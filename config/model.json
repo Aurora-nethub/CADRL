@@ -20,6 +20,7 @@
     "epsilon_end": 0.1,
     "epsilon_decay": 150,
     "num_epochs": 30,
-    "checkpoint_interval": 30
+    "checkpoint_interval": 30,
+    "random_seed": 42
   }
 }

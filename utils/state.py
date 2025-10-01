@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+import torch
 
 @dataclass
 class FullState:
@@ -40,15 +41,16 @@ class JointState:
     vy1: float
     radius1: float
 
+    def to_tensor(self) -> torch.Tensor:
+        """Convert all fields to a PyTorch tensor in declaration order."""
+        # Collect all field values in the order they appear in the class
+        values = [getattr(self, field.name) for field in fields(self)]
+        return torch.tensor(values, dtype=torch.float32)
+
 @dataclass
 class Velocity:
     vx: float
     vy: float
 
-@dataclass
-class Action:
-    # v is velocity, under kinematic constraints, r is rotation angle otherwise it's speed direction
-    v: float
-    r: float
 
-__all__ = ['FullState', 'ObservableState', 'JointState', 'Velocity', 'Action']
+__all__ = ['FullState', 'ObservableState', 'JointState', 'Velocity']

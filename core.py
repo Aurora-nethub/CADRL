@@ -59,6 +59,7 @@ class TrainConfig:
     epsilon_decay: int = 150
     num_epochs: int = 30
     checkpoint_interval: int = 30
+    random_seed: int = 42
 
 @dataclass
 class ConfigContainer:
