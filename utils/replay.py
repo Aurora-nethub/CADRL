@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, Optional
 import threading
 import torch
+from typing import Any
 
 
 class ReplayMemory:
@@ -46,8 +47,26 @@ class ReplayMemory:
         a_idx: Optional[int] = None,
     ) -> None:
         """写入单条经验；输入张量会被复制到 CPU 缓冲。"""
-        s_cpu = torch.as_tensor(s, dtype=torch.float32, device="cpu").flatten()
-        sn_cpu = torch.as_tensor(s_next, dtype=torch.float32, device="cpu").flatten()
+        # Accept inputs that are already tensors OR have a .to_tensor(as_batch=False) method
+        def _to_cpu_tensor(x: Any) -> torch.Tensor:
+            # If it's already a tensor, ensure dtype and device
+            if isinstance(x, torch.Tensor):
+                return x.to(dtype=torch.float32, device="cpu").flatten()
+            # If object exposes to_tensor(as_batch=False) (e.g., JointState), use it
+            if hasattr(x, "to_tensor"):
+                try:
+                    t = x.to_tensor(as_batch=False)
+                    if isinstance(t, torch.Tensor):
+                        return t.to(dtype=torch.float32, device="cpu").flatten()
+                except TypeError:
+                    # Fallback if the signature differs
+                    t = x.to_tensor()
+                    return torch.as_tensor(t, dtype=torch.float32, device="cpu").flatten()
+            # Fallback: attempt to convert directly
+            return torch.as_tensor(x, dtype=torch.float32, device="cpu").flatten()
+
+        s_cpu = _to_cpu_tensor(s)
+        sn_cpu = _to_cpu_tensor(s_next)
         if s_cpu.numel() != self.state_dim or sn_cpu.numel() != self.state_dim:
             raise ValueError(f"state dim mismatch: expect {self.state_dim}, got {s_cpu.numel()} and {sn_cpu.numel()}")
 
