@@ -1,9 +1,12 @@
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import json
 
 import torch
+import logging
+import os
+import sys
 
 @dataclass
 class AgentConfig:
@@ -64,15 +67,16 @@ class TrainConfig:
 @dataclass
 class ConfigContainer:
     """统一配置容器"""
-    agent: AgentConfig = AgentConfig()
-    sim: SimulationConfig = SimulationConfig()
-    visualization: VisualizationConfig = VisualizationConfig()
-    model: ModelConfig = ModelConfig()
-    init: InitConfig = InitConfig()
-    train: TrainConfig = TrainConfig()
+    agent: AgentConfig = field(default_factory=AgentConfig)
+    sim: SimulationConfig = field(default_factory=SimulationConfig)
+    visualization: VisualizationConfig = field(default_factory=VisualizationConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
+    init: InitConfig = field(default_factory=InitConfig)
+    train: TrainConfig = field(default_factory=TrainConfig)
     device: torch.device = field(
         default_factory=lambda: torch.device("cuda" if torch.cuda.is_available() else "cpu")
     )
+    logger: Optional[logging.Logger] = field(default=None)
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> "ConfigContainer":
@@ -106,6 +110,35 @@ class ConfigContainer:
                     if hasattr(section_obj, key):
                         setattr(section_obj, key, value)
 
+    def init_logger(self, *, log_dir: str = "logs", log_file: str = "cadrl.log") -> None:
+        """
+        Initialize a file logger for the config container. Creates `log_dir` if missing.
+        """
+        if getattr(self, "logger", None) is not None:
+            return
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, log_file)
+        logger = logging.getLogger("cadrl")
+        logger.setLevel(logging.INFO)
+        # avoid adding multiple handlers in interactive runs
+        if not any(
+            isinstance(h, logging.FileHandler)
+            and getattr(h, "baseFilename", None) == os.path.abspath(log_path)
+            for h in logger.handlers
+        ):
+            fh = logging.FileHandler(log_path, encoding="utf-8")
+            fh.setLevel(logging.INFO)
+            fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+            fh.setFormatter(fmt)
+            logger.addHandler(fh)
+        # also add a StreamHandler once if none exists (so logs show during runs)
+        if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+            sh = logging.StreamHandler()
+            sh.setLevel(logging.INFO)
+            sh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+            logger.addHandler(sh)
+        self.logger = logger
+
     def __str__(self) -> str:
         """返回格式化的配置字符串"""
         sections = [
@@ -125,18 +158,28 @@ class ConfigContainer:
 
 
 def _load_config(
-    env_config_path: str="config/env.json",
-    model_config_path: str="config/model.json",
+    env_config_path: str = "config/env.json",
+    model_config_path: str = "config/model.json",
 ) -> ConfigContainer:
     """加载配置文件并返回配置容器"""
-    with open(env_config_path, "r",encoding="utf-8") as f:
+    with open(env_config_path, "r", encoding="utf-8") as f:
         env_config = json.load(f)
-    with open(model_config_path, "r",encoding="utf-8") as f:
+    with open(model_config_path, "r", encoding="utf-8") as f:
         model_config = json.load(f)
 
     config = ConfigContainer()
     config.update(env_config)
     config.update(model_config)
+
+    # 尝试初始化日志并记录配置
+    try:
+        config.init_logger()
+        config.logger.info("Loaded configuration from %s and %s", env_config_path, model_config_path)
+        config.logger.info("Device: %s", config.device)
+    except Exception as exc:  # pylint: disable=broad-except
+        # 日志不应导致配置加载失败；捕获错误但提供基本反馈
+        sys.stderr.write(f"日志初始化失败: {type(exc).__name__} - {exc}\n")
+
     return config
 
 def get_config_container() -> ConfigContainer:

@@ -105,8 +105,8 @@ class ValueNetwork(nn.Module):
 
         # 组合新状态
         new_state = torch.cat([
-            dg, v_pref, vx_rot, vy_rot, radius, theta_rot, 
-            vx1_rot, vy1_rot, px1_rot, py1_rot, 
+            dg, v_pref, vx_rot, vy_rot, radius, theta_rot,
+            vx1_rot, vy1_rot, px1_rot, py1_rot,
             radius1, radius_sum, cos_theta, sin_theta, da
         ], dim=1)
 
@@ -123,7 +123,8 @@ class ValueNetwork(nn.Module):
         torch.save({
             'state_dict': self.state_dict(),
             'config': {
-                'state_dim': self.value_network[0].in_features if not self.reparametrization else 14,
+                # when reparametrization=True the rotate() produces a 15-D input
+                'state_dim': self.value_network[0].in_features if not self.reparametrization else 15,
                 'fc_layers': [layer.out_features for layer in self.value_network if isinstance(layer, nn.Linear)][:-1],
                 'kinematic': self.kinematic,
                 'reparametrization': self.reparametrization
