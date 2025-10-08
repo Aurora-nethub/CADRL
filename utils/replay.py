@@ -1,9 +1,8 @@
 # utils/replay.py
 from __future__ import annotations
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 import threading
 import torch
-from typing import Any
 
 
 class ReplayMemory:
