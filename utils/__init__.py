@@ -1,7 +1,8 @@
 from .action import ActionSpace, Action
-from .trajectory import Trajectory, compute_value
+from .trajectory import Trajectory
 from .replay import ReplayMemory
-from .state import *
+from .state import JointState
+from .value_target import ArrivalTimeTarget, TDTarget
 
 
-__all__ = ['Action', 'ActionSpace','Trajectory','compute_value', 'ReplayMemory']
+__all__ = ['Action', 'ActionSpace','Trajectory', 'ReplayMemory', 'JointState', 'ArrivalTimeTarget', 'TDTarget']
