@@ -78,6 +78,9 @@ class CADRLEnv:
         self._step_count: int = 0
         self._last_step_ratio: float = 1.0  # 本步推进比例（便于外部累计真实时间）
         self._test_counter: int = 0
+        
+        # 扰动范围（可由外部动态设置）
+        self.disturb_range: Tuple[float, float] = (0.7, 1.3)
 
     # ---------------- 公有接口 ----------------
 
@@ -85,15 +88,14 @@ class CADRLEnv:
     def reset(self, case: Optional[int] = None, disturb_cr: bool = True) -> List[JointState]:
         """
         初始化两车：自车(-cr,0)->(+cr,0)，对手在半径 cr 上取角度反向
-        cr扰动范围为 crossing_radius 的 0.7~1.3倍，默认训练和测试都扰动（可通过disturb_cr关闭）
+        cr扰动范围由 self.disturb_range 控制，默认训练和测试都扰动（可通过disturb_cr关闭）
         case参数用于测试集复现
         """
         base_cr = self.crossing_radius
         if disturb_cr:
-            cr = random.uniform(0.7, 1.3) * base_cr
+            cr = random.uniform(*self.disturb_range) * base_cr
         else:
-            # cr = base_cr
-            cr = random.uniform(0.7, 1.3) * base_cr  # 测试时也扰动，增加难度
+            cr = base_cr
 
         # 自车从左到右
         self._agents[0] = _Agent(

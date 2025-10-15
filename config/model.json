@@ -23,6 +23,15 @@
     "epsilon_decay": 400,
     "num_epochs": 1000,
     "checkpoint_interval": 50,
-    "random_seed": 42
+    "random_seed": 42,
+    "disturb_cr_schedule": {
+      "stage1_epochs": 100,
+      "stage1_range": [1.0, 1.0],
+      "stage2_epochs": 200,
+      "stage2_range": [0.9, 1.1],
+      "stage3_epochs": 400,
+      "stage3_range": [0.8, 1.2],
+      "stage4_range": [0.7, 1.3]
+    }
   }
 }

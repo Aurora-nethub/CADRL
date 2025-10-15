@@ -222,11 +222,36 @@ def run_training(
     train_pbar = tqdm(range(num_epochs), desc="训练进度",
                      unit="epoch", colour="green", ncols=100)
 
-
+    # 读取扰动调度配置
+    disturb_schedule = getattr(cfg.train, "disturb_cr_schedule", None)
+    if disturb_schedule is None:
+        # 默认配置（全程固定扰动）
+        disturb_schedule = {
+            "stage1_epochs": 0,
+            "stage1_range": [1.0, 1.0],
+            "stage2_epochs": 0,
+            "stage2_range": [0.9, 1.1],
+            "stage3_epochs": 0,
+            "stage3_range": [0.8, 1.2],
+            "stage4_range": [0.7, 1.3]
+        }
 
     recent_episodes = []  # 缓存最近5条episode的Trajectory对象
 
     for epoch in train_pbar:
+        # 动态调整扰动范围（分阶段渐进）
+        stage1 = disturb_schedule.get("stage1_epochs", 0)
+        stage2 = disturb_schedule.get("stage2_epochs", 0)
+        stage3 = disturb_schedule.get("stage3_epochs", 0)
+        
+        if epoch < stage1:
+            env.disturb_range = tuple(disturb_schedule.get("stage1_range", [1.0, 1.0]))
+        elif epoch < stage1 + stage2:
+            env.disturb_range = tuple(disturb_schedule.get("stage2_range", [0.9, 1.1]))
+        elif epoch < stage1 + stage2 + stage3:
+            env.disturb_range = tuple(disturb_schedule.get("stage3_range", [0.8, 1.2]))
+        else:
+            env.disturb_range = tuple(disturb_schedule.get("stage4_range", [0.7, 1.3]))
         # collect some episodes into replay
         episode_rewards = []
         episode_lengths = []
