@@ -63,6 +63,7 @@ class TrainConfig:
     num_epochs: int = 30
     checkpoint_interval: int = 30
     random_seed: int = 42
+    pretrain_epochs: int = 0
 
 @dataclass
 class ConfigContainer:

@@ -33,3 +33,6 @@ data/multi_sim/
 # OS
 .DS_Store
 Thumbs.db
+
+# checkpoints
+checkpoints/*

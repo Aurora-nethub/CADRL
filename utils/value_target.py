@@ -13,7 +13,7 @@ class PairGenerator:
 
 
 def _delta_ts(traj: Trajectory, times: Optional[List[float]]) -> List[float]:
-    T = len(traj) # pylint: disable=invalid-name
+    T = len(traj)  # pylint: disable=invalid-name
     if T < 2:
         return []
     # 优先使用外部传入 times；否则用 traj.times；再否则 Δt=1
@@ -52,7 +52,7 @@ class ArrivalTimeTarget(PairGenerator):
                       times: Optional[List[float]] = None,
                       terminal: Optional[str] = None
                       ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-        T = len(traj) # pylint: disable=invalid-name
+        T = len(traj)  # pylint: disable=invalid-name
         if T < 2:
             return []
 
@@ -60,23 +60,24 @@ class ArrivalTimeTarget(PairGenerator):
         if terminal is None:
             px = float(traj.positions[-1, 0, 0]); py = float(traj.positions[-1, 0, 1])
             tol = float(self.goal_tolerance) if self.goal_tolerance is not None else float(traj.radius)
-            success = ( (px - traj.goal_x) ** 2 + (py - traj.goal_y) ** 2 ) ** 0.5 <= tol
+            success = ((px - traj.goal_x) ** 2 + (py - traj.goal_y) ** 2) ** 0.5 <= tol
             terminal = "success" if success else "failure"
         if terminal == "failure" and not self.keep_failed:
             return []
 
         deltas = _delta_ts(traj, times)
 
-        # 与在线规则一致，从 Trajectory 直接生成每步奖励（离线不做过近 shaping）
+        # —— 预训练阶段使用 “init” 口径（Δt*时间惩罚 + 末步终端项；不做过近 shaping）
         rewards = generate_step_rewards_for_trajectory(
             traj,
             spec=self.reward_spec,
             goal_tolerance=self.goal_tolerance,
             terminal_hint=terminal,
-            times=times
+            times=times,
+            phase="init",
         )
 
-        # 折扣
+        # 折扣因子（按 Δt 和 v_pref）
         g = [_discount(self.gamma, deltas[k], float(traj.v_pref)) for k in range(T - 1)]
 
         # 后向累计 returns-to-go
@@ -128,17 +129,21 @@ class TDTarget(PairGenerator):
                       terminal: Optional[str] = None,
                       other_traj: Optional[Trajectory] = None
                       ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-        T = len(traj) # pylint: disable=invalid-name
+        T = len(traj)  # pylint: disable=invalid-name
         if T < 2:
             return []
 
         deltas = _delta_ts(traj, times)
-        # 与初始化一致的奖励规则（在线时通常由 env.step 返回；此处为对齐与容错）
+
+        # —— 强化训练阶段使用 “train” 口径（经典 CADRL：碰撞/过近/到达；无 living cost）
+        # 说明：在线时通常由 env.step 提供 r，这里用离线近似生成以便离线构造 TD 目标。
         rewards = generate_step_rewards_for_trajectory(
             traj,
             spec=self.reward_spec,
+            goal_tolerance=None,         # 训练口径下已含到达逻辑
             terminal_hint=terminal,
-            times=times
+            times=times,
+            phase="train",
         )
 
         if terminals is None:
@@ -168,4 +173,3 @@ class TDTarget(PairGenerator):
 
 
 __all__ = ["RewardSpec", "ArrivalTimeTarget", "TDTarget"]
-

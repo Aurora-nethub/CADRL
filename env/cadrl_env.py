@@ -10,8 +10,9 @@ from core import ConfigContainer  # 可接受你的配置容器
 from utils.action import Action
 from utils.state import FullState, BaseState, JointState
 from sim.dynamics import rollout_state
-from sim.reward import compute_reward
+from sim.reward import compute_reward, RewardSpec
 
+SPEC = RewardSpec()
 
 @dataclass
 class _Agent:
@@ -136,8 +137,33 @@ class CADRLEnv:
             end_ratios[i] = float(end_i)
 
         # 碰撞互斥（按开源实现，对称）
-        if rewards[0] == -0.25 or rewards[1] == -0.25:
-            assert rewards[0] == rewards[1], "collision reward must be mutual"
+        # --- 碰撞同步化：任一侧判为碰撞 -> 双方都按碰撞处理 ---
+        COLL_PEN = float(getattr(getattr(self.cfg, "reward", object()), "collision_penalty", -0.25))  # pylint: disable=invalid-name
+        GOAL_REW = float(getattr(getattr(self.cfg, "reward", object()), "goal_reward", 1.0))  # pylint: disable=invalid-name
+        EPS = 1e-6  # pylint: disable=invalid-name  # 数值容差，放宽到 1e-6 更稳
+
+        col0 = abs(rewards[0] - COLL_PEN) < EPS
+        col1 = abs(rewards[1] - COLL_PEN) < EPS
+
+        # 也检查到达goal的情况
+        goal0 = abs(rewards[0] - GOAL_REW) < EPS
+        goal1 = abs(rewards[1] - GOAL_REW) < EPS
+
+        if col0 or col1:
+            # 若某一侧到达(goal)而另一侧碰撞，优先级：碰撞 > 到达
+            # 用"更早"的截断比例（谁先撞用谁），保证推进一致
+            t_ratio = min(float(end_ratios[0]), float(end_ratios[1]))
+            rewards[0] = rewards[1] = COLL_PEN
+            end_ratios[0] = end_ratios[1] = t_ratio
+        elif goal0 or goal1:
+            # 如果只有goal而无碰撞，也统一奖励（保持一致性）
+            # 这可以避免两边计算略有差异的情况
+            t_ratio = min(float(end_ratios[0]), float(end_ratios[1]))
+            # 如果有一方到达，都给到达奖励
+            if goal0 or goal1:
+                rewards[0] = rewards[1] = GOAL_REW
+                end_ratios[0] = end_ratios[1] = t_ratio
+
 
         # 2) 依据各自 end_time_ratio 推进（用 sim.dynamics，避免重复公式）
         for i in range(2):
@@ -156,9 +182,9 @@ class CADRLEnv:
             a = self._agents[i]
             r = rewards[i]
             if a.done == 0:  # 只处理活跃的
-                if r == 1.0:
+                if r == SPEC.goal_reward:
                     a.done = 1
-                elif r == -0.25:
+                elif r == SPEC.collision_penalty:
                     a.done = 2
                 elif not self._in_bound(i):
                     a.done = 3
