@@ -132,7 +132,9 @@ def run_training(
 
     # -------------------- supervised pretraining (optional) --------------------
 
-    pretrain_epochs = getattr(cfg.train, "pretrain_epochs", 0)
+    pretrain_epochs = getattr(cfg.init, "pretrain_epochs", 0)
+    pretrain_batch_size = getattr(cfg.init, "pretrain_batch_size", 500)
+    pretrain_total_iters = getattr(cfg.init, "pretrain_total_iters", 10000)
     traj_dir = getattr(cfg.init, "traj_dir", None)
     if pretrain_epochs > 0 and traj_dir:
         print("\n" + "="*70)
@@ -151,44 +153,31 @@ def run_training(
             model.train()
 
             # 预训练进度条
-            pretrain_pbar = tqdm(range(pretrain_epochs), desc="预训练进度",
-                                unit="epoch", colour="blue", ncols=100)
-
-            for pe in pretrain_pbar:
-                pairs = []
-                for traj in trajectories:
-                    pairs.extend(pair_gen.compute_pairs(traj))
-
-                epoch_loss = 0.0
-                batch_count = 0
-
-                # small random shuffle and batch
-                torch.manual_seed(pe)
-                for i in range(0, max(1, len(pairs)), int(cfg.train.batch_size)):
-                    batch_pairs = pairs[i:i + int(cfg.train.batch_size)]
-                    if not batch_pairs:
-                        continue
-                    s_batch = torch.stack([p[0].flatten() for p in batch_pairs]).to(device)
-                    y_batch = torch.stack([p[1].flatten() for p in batch_pairs]).to(device)
-                    pred = model(s_batch)
-                    loss_pre = nn.functional.mse_loss(pred, y_batch)
-                    preoptimizer.zero_grad()
-                    loss_pre.backward()
-                    preoptimizer.step()
-
-                    epoch_loss += loss_pre.item()
-                    batch_count += 1
-
-                # 更新进度条显示
-                avg_loss = epoch_loss / max(1, batch_count)
+            # 兼容原论文：总共 pretrain_total_iters 次，每次 batch_size
+            pairs = []
+            for traj in trajectories:
+                pairs.extend(pair_gen.compute_pairs(traj))
+            total_pairs = len(pairs)
+            pretrain_pbar = tqdm(range(pretrain_total_iters), desc="预训练进度",
+                                unit="iter", colour="blue", ncols=100)
+            for it in pretrain_pbar:
+                # 随机采样 batch
+                idx = torch.randperm(total_pairs)[:pretrain_batch_size]
+                batch_pairs = [pairs[i] for i in idx]
+                s_batch = torch.stack([p[0].flatten() for p in batch_pairs]).to(device)
+                y_batch = torch.stack([p[1].flatten() for p in batch_pairs]).to(device)
+                pred = model(s_batch)
+                loss_pre = nn.functional.mse_loss(pred, y_batch)
+                preoptimizer.zero_grad()
+                loss_pre.backward()
+                preoptimizer.step()
                 pretrain_pbar.set_postfix({
-                    "loss": f"{avg_loss:.4f}",
-                    "pairs": len(pairs),
-                    "batches": batch_count
+                    "loss": f"{loss_pre.item():.4f}",
+                    "pairs": total_pairs,
+                    "batch": pretrain_batch_size
                 })
-
             pretrain_pbar.close()
-            print(f"✓ 预训练完成！共训练 {pretrain_epochs} 轮")
+            print(f"✓ 预训练完成！共训练 {pretrain_total_iters} 次 batch")
             # end pretraining
         else:
             print("⚠ 警告：未找到有效的轨迹数据，跳过预训练")

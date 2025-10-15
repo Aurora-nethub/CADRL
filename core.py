@@ -44,7 +44,9 @@ class ModelConfig:
 class InitConfig:
     """初始化配置"""
     traj_dir: str = "data/multi_sim"
-    num_epochs: int = 250
+    pretrain_epochs: int = 10
+    pretrain_batch_size: int = 500
+    pretrain_total_iters: int = 10000
 
 @dataclass
 class TrainConfig:
@@ -52,18 +54,17 @@ class TrainConfig:
     batch_size: int = 100
     learning_rate: float = 0.01
     step_size: int = 150
-    train_episodes: int = 200
-    sample_episodes: int = 10
+    train_episodes: int = 1000  # 总episode数，建议主控
+    sample_episodes: int = 1    # 每轮采样episode数，建议设为1
     test_interval: int = 10
     test_episodes: int = 100
     capacity: int = 40000
     epsilon_start: float = 0.5
     epsilon_end: float = 0.1
-    epsilon_decay: int = 150
-    num_epochs: int = 30
-    checkpoint_interval: int = 30
+    epsilon_decay: int = 400    # epsilon衰减episode数
+    num_epochs: int = 1000      # 若用epoch主控，等于train_episodes/sample_episodes
+    checkpoint_interval: int = 50
     random_seed: int = 42
-    pretrain_epochs: int = 0
 
 @dataclass
 class ConfigContainer:
