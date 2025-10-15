@@ -21,6 +21,7 @@ class ReplayMemory:
         self.s_next = torch.zeros((capacity, state_dim), dtype=torch.float32)
         self.done   = torch.zeros((capacity, 1),       dtype=torch.bool)
         self.a_idx  = torch.full((capacity,), -1,      dtype=torch.long)
+        self.buf_dt = torch.zeros((capacity, 1), dtype=torch.float32)  # 新增: 存每条transition的dt
 
         self.position = 0
         self.size = 0
@@ -43,6 +44,7 @@ class ReplayMemory:
         r: float,
         s_next: torch.Tensor,
         done: bool,
+        dt: float,
         a_idx: Optional[int] = None,
     ) -> None:
         """写入单条经验；输入张量会被复制到 CPU 缓冲。"""
@@ -76,6 +78,7 @@ class ReplayMemory:
             self.s_next[i] = sn_cpu
             self.done[i, 0]= bool(done)
             self.a_idx[i]  = -1 if a_idx is None else int(a_idx)
+            self.buf_dt[i, 0] = float(dt)
 
             self.position = (self.position + 1) % self.capacity
             self.size = min(self.size + 1, self.capacity)
@@ -105,7 +108,8 @@ class ReplayMemory:
         a_idx  = self.a_idx.index_select(0, idx).clone()
         a_mask = a_idx >= 0
 
-        return {"s": s, "r": r, "s_next": s_next, "done": done, "a_idx": a_idx, "a_mask": a_mask}
+        dt = self.buf_dt.index_select(0, idx).clone()
+        return {"s": s, "r": r, "s_next": s_next, "done": done, "a_idx": a_idx, "a_mask": a_mask, "dt": dt}
 
     # --------- 可选：持久化，便于断点续训 ---------
 
@@ -120,6 +124,7 @@ class ReplayMemory:
             "s_next": self.s_next,
             "done": self.done,
             "a_idx": self.a_idx,
+            "buf_dt": self.buf_dt,
         }, path)
 
     @classmethod
@@ -133,6 +138,8 @@ class ReplayMemory:
         mem.s_next.copy_(data["s_next"])
         mem.done.copy_(data["done"])
         mem.a_idx.copy_(data["a_idx"])
+        if "buf_dt" in data:
+            mem.buf_dt.copy_(data["buf_dt"])
         return mem
 
 

@@ -22,7 +22,7 @@ from agent import CADRLAgent
 from models import ValueNetwork
 from utils import ActionSpace, ReplayMemory
 from utils.trajectory import Trajectory
-from utils.value_target import ArrivalTimeTarget
+from utils.value_target import ArrivalTimeTarget, TDTarget
 
 
 def load_trajectories(path: str, *, skip_timed_out: bool = True) -> List[Trajectory]:
@@ -233,6 +233,10 @@ def run_training(
     train_pbar = tqdm(range(num_epochs), desc="训练进度",
                      unit="epoch", colour="green", ncols=100)
 
+
+
+    recent_episodes = []  # 缓存最近5条episode的Trajectory对象
+
     for epoch in train_pbar:
         # collect some episodes into replay
         episode_rewards = []
@@ -243,25 +247,93 @@ def run_training(
             done = [False, False]
             steps = 0
             ep_reward = 0.0
+            ep_buf = []
+            
+            # 记录完整轨迹信息（用于构造Trajectory）
+            ep_times = [0.0]
+            ep_positions = [[
+                [states[0].self_state.px, states[0].self_state.py],
+                [states[0].neighbor_state.px, states[0].neighbor_state.py]
+            ]]
+            t_acc = 0.0
+
+
+            def _eps(epoch, total, eps_start=0.2, eps_end=0.02):
+                t = min(1.0, epoch / max(1, total))
+                return eps_start + (eps_end - eps_start) * t
 
             while not all(done) and steps < env.max_steps:
                 actions = []
                 for i in range(2):
                     s = states[i]
-                    a = agent.act(s, env, i, mode="train")
+                    if torch.rand(()) < _eps(epoch, num_epochs):
+                        a = action_space.sample()
+                    else:
+                        a = agent.act(s, env, i, mode="train")
                     actions.append(a)
                 s_next, rewards, dones = env.step(actions)
-                # push transitions for each agent
+                eff_dt = float(env.last_step_ratio) * float(env.dt)
+                t_acc += eff_dt
                 for i in range(2):
-                    replay.push(s=states[i], r=rewards[i], s_next=s_next[i], done=dones[i] != 0)
+                    ep_buf.append({
+                        "s": states[i],
+                        "r": rewards[i],
+                        "s_next": s_next[i],
+                        "done": (dones[i] != 0),
+                        "dt": eff_dt
+                    })
+                # 记录轨迹数据（agent0视角）
+                ep_times.append(t_acc)
+                ep_positions.append([
+                    [s_next[0].self_state.px, s_next[0].self_state.py],
+                    [s_next[0].neighbor_state.px, s_next[0].neighbor_state.py]
+                ])
 
-                ep_reward += rewards[0]  # 记录agent 0的奖励
+                ep_reward += rewards[0]
                 states = s_next
                 done = [d != 0 for d in dones]
                 steps += 1
 
+            # episode 结束后统一写入
+            for tr in ep_buf:
+                replay.push(**tr)
             episode_rewards.append(ep_reward)
             episode_lengths.append(steps)
+
+            # 构造完整Trajectory对象并缓存
+            if len(ep_positions) >= 2:
+                traj = Trajectory(
+                    gamma=float(cfg.model.gamma),
+                    goal_x=float(cfg.sim.crossing_radius),
+                    goal_y=0.0,
+                    radius=float(cfg.agent.radius),
+                    v_pref=float(cfg.agent.v_pref),
+                    times=np.array(ep_times, dtype=np.float32),
+                    positions=np.array(ep_positions, dtype=np.float32),
+                    kinematic=bool(cfg.agent.kinematic)
+                )
+                recent_episodes.append(traj)
+                if len(recent_episodes) > 5:
+                    recent_episodes.pop(0)
+
+                # 每个episode后都做一次FQI微调（只要recent_episodes满5条）
+                if len(recent_episodes) == 5:
+                    tdgen = TDTarget(gamma=float(cfg.model.gamma), model_or_fn=model, device=device)
+                    all_pairs = []
+                    for t in recent_episodes:
+                        pairs = tdgen.compute_pairs(t, times=t.times.tolist())
+                        all_pairs.extend(pairs)
+                    if all_pairs:
+                        s_batch = torch.stack([p[0].flatten() for p in all_pairs]).to(device)
+                        y_batch = torch.stack([p[1].flatten() for p in all_pairs]).to(device)
+                        model.train()
+                        optimizer.zero_grad()
+                        pred = model(s_batch)
+                        loss_fqi = nn.functional.mse_loss(pred, y_batch)
+                        loss_fqi.backward()
+                        optimizer.step()
+                        tqdm.write(f"💡 FQI微调: 用{len(all_pairs)}对样本做一轮回归, loss={loss_fqi.item():.4f}")
+
 
         # learning step if enough data
         train_loss = 0.0
@@ -271,14 +343,16 @@ def run_training(
             r = batch["r"].to(device)
             s_next = batch["s_next"].to(device)
             done = batch["done"].to(device)
+            dt_b = batch["dt"].to(device)
 
             with torch.no_grad():
                 v_next = model(s_next).detach()
             v = model(s)
 
-            # TD target: y = r + gamma * v_next * (1 - done)
             gamma = float(cfg.model.gamma)
-            y = r + gamma * v_next * (~done)
+            v_pref = float(cfg.agent.v_pref)
+            g = gamma ** (dt_b * v_pref)
+            y = r + g * v_next * (~done)
 
             loss = nn.functional.mse_loss(v, y)
             optimizer.zero_grad()

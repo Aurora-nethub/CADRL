@@ -48,14 +48,14 @@ class CADRLEnv:
         cfg: ConfigContainer,
         phase: str = "train",
         *,
-        dt: float = 1.0,
         collision_mode: str = "analytic",  # "analytic" 或 "sample3"
     ) -> None:
         assert phase in ("train", "test")
         assert collision_mode in ("analytic", "sample3")
         self.cfg = cfg
         self.phase = phase
-        self.dt = float(dt)
+        # 优先读取cfg.sim.dt，否则用默认0.1
+        self.dt = float(getattr(getattr(cfg, "sim", object()), "dt", 0.1))
         self.collision_mode = collision_mode
 
         # 读取配置

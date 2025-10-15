@@ -75,11 +75,13 @@ def compute_reward_cadrl_train(
     step_ratio = (t_star / dt) if (0.0 < t_star < dt and dt > 0) else 1.0
     reward = 0.0  # 经典 CADRL 没有 living cost
 
+
     sum_r = s0.radius + s1.radius
     gap = dmin - sum_r
+    eps_c = 1e-8 * float(max(1.0, sum_r))
 
-    # 碰撞
-    if dmin < sum_r:
+    # 碰撞（带容差）
+    if dmin <= (sum_r + eps_c):
         reward += collision_penalty
         return reward, step_ratio
 
