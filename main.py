@@ -6,8 +6,11 @@ Keep argument parsing here; `scripts.train` exposes `run_training` without CLI.
 """
 from __future__ import annotations
 
+
+import os
 import argparse
 import sys
+import subprocess
 import random
 from typing import Optional
 
@@ -19,7 +22,8 @@ from scripts.train import run_training
 
 
 def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="CADRL training entry point")
+    parser = argparse.ArgumentParser(description="CADRL training/test entry point")
+    parser.add_argument("--mode", type=str, default="train", choices=["train", "test"], help="Mode: train or test")
     parser.add_argument("--run-name", type=str, default=None, help="Name for this training run")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--device", type=str, default=None, help="Device to use (cpu or cuda[:id])")
@@ -86,8 +90,15 @@ def main(argv: Optional[list] = None) -> None:
         # best-effort logging: if logger fails, print to stderr
         sys.stderr.write(f"Logger init failed: {exc}\n")
 
-    # call training routine
-    run_training(cfg, device=device, resume=args.resume, run_name=args.run_name)
+
+    if getattr(args, "mode", "train") == "test":
+        cmd = [sys.executable, os.path.join(os.path.dirname(__file__), "scripts", "test.py")]
+        if args.run_name:
+            cmd += ["--run-name", args.run_name]
+        subprocess.run(cmd, check=True)
+    else:
+        # call training routine
+        run_training(cfg, device=device, resume=args.resume, run_name=args.run_name)
 
 
 if __name__ == "__main__":

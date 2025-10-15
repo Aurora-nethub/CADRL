@@ -160,7 +160,7 @@ def run_training(
             total_pairs = len(pairs)
             pretrain_pbar = tqdm(range(pretrain_total_iters), desc="预训练进度",
                                 unit="iter", colour="blue", ncols=100)
-            for it in pretrain_pbar:
+            for _ in pretrain_pbar:
                 # 随机采样 batch
                 idx = torch.randperm(total_pairs)[:pretrain_batch_size]
                 batch_pairs = [pairs[i] for i in idx]
@@ -237,7 +237,7 @@ def run_training(
             steps = 0
             ep_reward = 0.0
             ep_buf = []
-            
+
             # 记录完整轨迹信息（用于构造Trajectory）
             ep_times = [0.0]
             ep_positions = [[
@@ -321,7 +321,7 @@ def run_training(
                         loss_fqi = nn.functional.mse_loss(pred, y_batch)
                         loss_fqi.backward()
                         optimizer.step()
-                        tqdm.write(f"💡 FQI微调: 用{len(all_pairs)}对样本做一轮回归, loss={loss_fqi.item():.4f}")
+                        tqdm.write(f"💡 FQI微调: 用{len(all_pairs)}对样本做一轮回归, loss={loss_fqi.item():.8f}")
 
 
         # learning step if enough data

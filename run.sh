@@ -2,8 +2,10 @@
 # Minimal runner for CADRL on Unix-like shells
 set -euo pipefail
 
+
 # Usage:
-#   ./run.sh --run-name myrun --lr 0.001 --epochs 10
+#   ./run.sh --mode train --run-name myrun
+#   ./run.sh --mode test  --run-name myrun
 
 PYTHON=${PYTHON:-python}
 

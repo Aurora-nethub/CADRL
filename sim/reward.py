@@ -60,16 +60,17 @@ def compute_reward_cadrl_train(
     vx0n, vy0n, _ = _self_velocity_from_action(s0.theta, action_self, kinematic)
     vx1n, vy1n = _other_velocity_from_action(s1.vx, s1.vy, action_other, kinematic)
 
-    # 最近接近（解析或采样）
+    # 论文要求：奖励判定用1s lookahead，仿真推进仍用实际dt
+    lookahead_dt = 1.0
     if collision_mode == "analytic":
         dmin, t_star = closest_approach_analytic(
             s0.px, s0.py, vx0n, vy0n,
-            s1.px, s1.py, vx1n, vy1n, dt=dt
+            s1.px, s1.py, vx1n, vy1n, dt=lookahead_dt
         )
     else:
         dmin, t_star = closest_approach_sample3(
             s0.px, s0.py, vx0n, vy0n,
-            s1.px, s1.py, vx1n, vy1n, dt=dt
+            s1.px, s1.py, vx1n, vy1n, dt=lookahead_dt
         )
 
     step_ratio = (t_star / dt) if (0.0 < t_star < dt and dt > 0) else 1.0
