@@ -25,6 +25,7 @@ class SimulationConfig:
     ymin: float = -8.0
     ymax: float = 8.0
     max_time: float = 100.0
+    dt: float = 0.1
 
 @dataclass
 class VisualizationConfig:
@@ -65,6 +66,15 @@ class TrainConfig:
     num_epochs: int = 1000      # 若用epoch主控，等于train_episodes/sample_episodes
     checkpoint_interval: int = 50
     random_seed: int = 42
+    disturb_cr_schedule: Dict[str, Any] = field(default_factory=lambda: {
+        "stage1_epochs": 100,
+        "stage1_range": [1.0, 1.0],
+        "stage2_epochs": 200,
+        "stage2_range": [0.9, 1.1],
+        "stage3_epochs": 300,
+        "stage3_range": [0.8, 1.2],
+        "stage4_range": [0.7, 1.3]
+    })
 
 @dataclass
 class ConfigContainer:

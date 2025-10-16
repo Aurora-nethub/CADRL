@@ -1,42 +1,56 @@
 # sim/reward.py
 import math
+from typing import Tuple, Optional, List, Callable
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple, List
+
 import torch
 
-from utils import Action, Trajectory
 from utils.state import JointState, unpack_joint
-from .dynamics import _self_velocity_from_action, _other_velocity_from_action
-from .collision import closest_approach_analytic, closest_approach_sample3
+from utils.action import Action
+from utils.trajectory import Trajectory
+from sim.collision import closest_approach_analytic, closest_approach_sample3
 
 
-# ---------------------------
-# 奖励规格（保留原字段，新增少量注释）
-# ---------------------------
 @dataclass
 class RewardSpec:
-    # 初始化阶段（imitation-style）会用到的时间惩罚 + 终端项
-    step_time_penalty: float = -0.01  # 每秒(或每步)时间惩罚（仅用于初始化阶段）
-    goal_reward: float = 1.0          # 到达终端奖励（两阶段可共用）
-    collision_penalty: float = -0.25  # 碰撞终端惩罚（训练阶段用；离线可选）
-    failure_penalty: float = 0.0      # 超时/失败（初始化阶段可用；训练阶段通常不用）
-
-    # 训练阶段（经典 CADRL）过近整形阈值（对 gap = dmin - (r0+r1)）
-    near_gap_threshold: float = 0.2   # 0 <= gap < 0.2 时的线性惩罚区
+    """奖励函数超参数规格"""
+    goal_reward: float = 1.0
+    collision_penalty: float = -0.25
+    failure_penalty: float = 0.0
+    step_time_penalty: float = -0.01
+    near_gap_threshold: float = 0.2
 
 
-# ----------------------------------------------------------------------
-# 训练阶段：一步即时奖励（经典 CADRL 口径）
-#   - 无“每步时间惩罚”（living cost）
-#   - 使用 gap = dmin - (r0+r1) 判定“过近”
-#   - 分段：
-#       碰撞: -0.25
-#       过近: -0.1 - gap/2
-#       到达: +1
-#       其他: 0
-# 返回: (reward, step_ratio)
-#   step_ratio 用于标注碰撞等在本步内的发生时刻比例；经典 CADRL 不依赖它做时间惩罚，但保留给外层使用。
-# ----------------------------------------------------------------------
+def _self_velocity_from_action(theta: float, action: Action, kinematic: bool) -> Tuple[float, float, float]:
+    """将动作转换为自车速度（世界坐标系）"""
+    if kinematic:
+        vx = action.velocity * math.cos(theta + action.rotation)
+        vy = action.velocity * math.sin(theta + action.rotation)
+        new_theta = theta + action.rotation
+    else:
+        vx = action.velocity * math.cos(action.rotation)
+        vy = action.velocity * math.sin(action.rotation)
+        new_theta = action.rotation
+    return vx, vy, new_theta
+
+
+def _other_velocity_from_action(vx_old: float, vy_old: float, action: Optional[Action], kinematic: bool) -> Tuple[float, float]:
+    """对手动作转速度（若为 None 则保持当前速度）"""
+    if action is None:
+        return vx_old, vy_old
+    if kinematic:
+        theta_old = math.atan2(vy_old, vx_old)
+        return (
+            action.velocity * math.cos(theta_old + action.rotation),
+            action.velocity * math.sin(theta_old + action.rotation)
+        )
+    else:
+        return (
+            action.velocity * math.cos(action.rotation),
+            action.velocity * math.sin(action.rotation)
+        )
+
+
 def compute_reward_cadrl_train(
     joint: torch.Tensor,
     action_self: Action,
@@ -44,7 +58,7 @@ def compute_reward_cadrl_train(
     *,
     dt: float,
     kinematic: bool,
-    collision_mode: str = "analytic",  # "analytic" or "sample3"
+    collision_mode: str = "analytic",
     goal_tolerance: Optional[float] = None,
     goal_reward: float = 1.0,
     collision_penalty: float = -0.25,
@@ -56,58 +70,132 @@ def compute_reward_cadrl_train(
     js: JointState = unpack_joint(joint)
     s0, s1 = js.self_state, js.neighbor_state
 
-    # 由动作得到本步恒定速度
+    # 1. living cost参数
+    step_time_penalty = -0.008  # 可调参数
+    safe_dt = max(1e-6, min(dt, 1.0))
+
+    # 2. 由动作得到本步恒定速度（只需要自车的速度）
     vx0n, vy0n, _ = _self_velocity_from_action(s0.theta, action_self, kinematic)
-    vx1n, vy1n = _other_velocity_from_action(s1.vx, s1.vy, action_other, kinematic)
 
-    # 论文要求：奖励判定用1s lookahead，仿真推进仍用实际dt
-    lookahead_dt = 1.0
-    if collision_mode == "analytic":
-        dmin, t_star = closest_approach_analytic(
-            s0.px, s0.py, vx0n, vy0n,
-            s1.px, s1.py, vx1n, vy1n, dt=lookahead_dt
-        )
-    else:
-        dmin, t_star = closest_approach_sample3(
-            s0.px, s0.py, vx0n, vy0n,
-            s1.px, s1.py, vx1n, vy1n, dt=lookahead_dt
-        )
+    # Keep unused params referenced for API stability and to silence linters
+    # (these are intentionally part of the signature for compatibility).
+    _ = action_other
+    _ = collision_mode
+    _ = near_gap_threshold
 
-    step_ratio = (t_star / dt) if (0.0 < t_star < dt and dt > 0) else 1.0
-    reward = 0.0  # 经典 CADRL 没有 living cost
-
-
+    # 3. 计算当前真实距离（环境层：用于判定碰撞和 done）
+    current_dist = math.hypot(s0.px - s1.px, s0.py - s1.py)
     sum_r = s0.radius + s1.radius
-    gap = dmin - sum_r
     eps_c = 1e-8 * float(max(1.0, sum_r))
 
-    # 碰撞（带容差）
-    if dmin <= (sum_r + eps_c):
-        reward += collision_penalty
-        return reward, step_ratio
-
-    # 过近整形（线性）
-    if 0.0 <= gap < float(near_gap_threshold):
-        reward += (-0.1 - gap / 2.0)
-        return reward, 1.0
-
-    # 步末到达（注意：经典 CADRL里到达与碰撞/过近的优先顺序实现上通常先判安全性）
-    nx = s0.px + vx0n * dt
-    ny = s0.py + vy0n * dt
+    # 4. 预测下一步位置，判定到达
+    nx = s0.px + vx0n * safe_dt
+    ny = s0.py + vy0n * safe_dt
     tol = float(goal_tolerance) if goal_tolerance is not None else float(s0.radius)
-    if math.hypot(nx - s0.pgx, ny - s0.pgy) <= tol:
-        reward += goal_reward
-        return reward, 1.0
+    arrived = math.hypot(nx - s0.pgx, ny - s0.pgy) <= tol
+    
+    # 5. 判定状态：完全基于当前真实几何（不用 lookahead）
+    collided = current_dist <= (sum_r + eps_c)
 
-    # 其他
+    # 6. 每步都扣 living cost（时间代价）
+    reward = step_time_penalty * safe_dt
+    
+    # 7. 只在终止步叠加终止奖励（collision/goal 为附加项）
+    if collided:
+        reward += collision_penalty
+    elif arrived:
+        reward += goal_reward
+    # 注意：near 奖励已移除，环境层不使用 lookahead
+    # near 的判断应该在策略层（agent 选动作时）通过前瞻处理
+
+    # 8. 安全检查：确保reward在合理范围内
+    if reward < -1.0 or reward > 1.0:
+        sep = "=" * 70
+        error_msg = (
+            f"\n{sep}\n"
+            "⚠️ REWARD OUT OF RANGE ⚠️\n"
+            f"{sep}\n"
+            f"reward = {reward:.6f}\n"
+            f"current_dist = {current_dist:.4f}\n"
+            f"sum_r = {sum_r:.4f}\n"
+            f"collision_penalty = {collision_penalty}\n"
+            f"goal_reward = {goal_reward}\n"
+            f"step_time_penalty = {step_time_penalty}\n"
+            f"safe_dt = {safe_dt}\n"
+            f"{sep}\n"
+        )
+        print(error_msg, flush=True)
+        reward = max(-1.0, min(1.0, reward))
+
+    # 9. 返回 reward 和 step_ratio（环境层：总是完整步长）
     return reward, 1.0
+#   - 我们按 Δt 计负的时间代价 + 末步终端（成功 +1，失败/failure_penalty）
+# 返回: (reward, step_ratio) —— 为了接口兼容，step_ratio=1.0（初始化时一般不需要 t*）
+# ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# 策略层专用：lookahead 前瞻（用于动作选择时评估候选动作）
+# ----------------------------------------------------------------------
+def compute_lookahead_score(
+    joint: torch.Tensor,
+    action_self: Action,
+    action_other: Optional[Action],
+    *,
+    kinematic: bool,
+    collision_mode: str = "analytic",
+    lookahead_time: float = 1.0,
+    lookahead_steps: int = 10,  # pylint: disable=unused-argument
+    near_penalty: float = -0.1,
+    near_gap_threshold: float = 0.2,
+) -> float:
+    """
+    策略层的前瞻评分（不是 reward，是动作候选的附加评分）。
+    
+    用途：在 agent 选择动作时，对每个候选动作做短时前瞻（例如 1s），
+         计算该动作下与邻居的最小分离距离，避免"逼近"或"碰撞"。
+    
+    返回：附加评分（负值表示惩罚）
+         - 如果前瞻期间会碰撞或接近，返回负值
+         - 如果安全，返回 0
+    """
+    js: JointState = unpack_joint(joint)
+    s0, s1 = js.self_state, js.neighbor_state
+    
+    # 由动作得到速度
+    vx0n, vy0n, _ = _self_velocity_from_action(s0.theta, action_self, kinematic)
+    vx1n, vy1n = _other_velocity_from_action(s1.vx, s1.vy, action_other, kinematic)
+    
+    # 计算前瞻窗口内的最小距离
+    if collision_mode == "analytic":
+        dmin, _ = closest_approach_analytic(
+            s0.px, s0.py, vx0n, vy0n,
+            s1.px, s1.py, vx1n, vy1n, dt=lookahead_time
+        )
+    else:
+        dmin, _ = closest_approach_sample3(
+            s0.px, s0.py, vx0n, vy0n,
+            s1.px, s1.py, vx1n, vy1n, dt=lookahead_time
+        )
+    
+    # 计算 gap
+    sum_r = s0.radius + s1.radius
+    gap = dmin - sum_r
+    
+    # 评分逻辑：接近时给予负分
+    if gap < 0:
+        # 会碰撞
+        return -0.25  # 与 collision_penalty 对应
+    elif 0.0 <= gap < near_gap_threshold:
+        # 接近但未碰撞
+        return near_penalty - gap / 2.0
+    else:
+        # 安全
+        # reference unused parameter to avoid linter warnings
+        _ = lookahead_steps
+        return 0.0
 
 
 # ----------------------------------------------------------------------
-# 初始化阶段：一步“时间型”奖励（用于离线生成标签 / imitation-style）
-#   - 与论文思路对齐：更快到达更好；通常不对“过近/碰撞”做 shaping
-#   - 我们按 Δt 计负的时间代价 + 末步终端（成功 +1，失败/failure_penalty）
-# 返回: (reward, step_ratio) —— 为了接口兼容，step_ratio=1.0（初始化时一般不需要 t*）
+# 初始化阶段的时间型奖励（保持不变）
 # ----------------------------------------------------------------------
 def compute_reward_init_time(
     *,

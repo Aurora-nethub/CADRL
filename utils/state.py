@@ -36,10 +36,13 @@ class JointState:
 
     def to_tensor(self, as_batch: bool = False) -> torch.Tensor:
         """Concatenate self and neighbor tensors into one tensor."""
-        return torch.cat([
-            self.self_state.to_tensor(as_batch),
-            self.neighbor_state.to_tensor(as_batch),
-        ])
+        # When as_batch=True each part has shape (1, N) and we should concat on dim=1 -> (1, 14)
+        # When as_batch=False each part is 1-D and we concat on dim=0 -> (14,)
+        a = self.self_state.to_tensor(as_batch)
+        b = self.neighbor_state.to_tensor(as_batch)
+        if as_batch:
+            return torch.cat([a, b], dim=1)
+        return torch.cat([a, b], dim=0)
 
     @classmethod
     def from_tensor(cls, joint: torch.Tensor) -> 'JointState':

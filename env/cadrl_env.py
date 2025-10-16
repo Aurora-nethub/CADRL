@@ -78,7 +78,7 @@ class CADRLEnv:
         self._step_count: int = 0
         self._last_step_ratio: float = 1.0  # 本步推进比例（便于外部累计真实时间）
         self._test_counter: int = 0
-        
+
         # 扰动范围（可由外部动态设置）
         self.disturb_range: Tuple[float, float] = (0.7, 1.3)
 
@@ -103,18 +103,19 @@ class CADRLEnv:
             pgx=cr, pgy=0.0, v_pref=self.v_pref, theta=0.0, kinematic=self.kinematic
         )
 
-        # 对手角度（训练随机、测试十等分）
+        # 对手角度（训练随机、测试均匀分布）
         if self.phase == "train":
             angle = random.random() * math.pi
             # 与开源一致的小间隔约束，避免太近
             while math.sin((math.pi - angle) / 2.0) < 0.3 / 2.0:
                 angle = random.random() * math.pi
         else:
+            n_cases = 20  # 测试case分辨率，和test.py保持一致
             if case is not None:
-                angle = (case % 10) / 10.0 * math.pi
+                angle = (case % n_cases) / n_cases * 2 * math.pi
                 self._test_counter = case
             else:
-                angle = (self._test_counter % 10) / 10.0 * math.pi
+                angle = (self._test_counter % n_cases) / n_cases * 2 * math.pi
                 self._test_counter += 1
 
         x, y = cr * math.cos(angle), cr * math.sin(angle)
@@ -137,44 +138,43 @@ class CADRLEnv:
         end_ratios: List[float] = [1.0, 1.0]
         done_signals: List[int] = []
 
-        # 1) 奖励与截断时间（两边都用“已知双方动作”的评分）
+        # 1) 奖励与截断时间（两边都用"已知双方动作"的评分）
+        # 重要：只对未终止的 agent 计算 reward，已终止的保持 0
         for i in range(2):
-            s_i = self._joint_tensor(i)  # (14,) CPU
-            r_i, end_i = compute_reward(
-                s_i, actions[i], actions[1 - i],
-                dt=self.dt, kinematic=self.kinematic,
-                collision_mode=self.collision_mode, goal_tolerance=self.radius
-            )
-            rewards[i] = float(r_i)
-            end_ratios[i] = float(end_i)
+            if self._agents[i].done != 0:
+                # 已终止的 agent 不再累计 reward
+                rewards[i] = 0.0
+                end_ratios[i] = 1.0
+            else:
+                s_i = self._joint_tensor(i)  # (14,) CPU
+                r_i, end_i = compute_reward(
+                    s_i, actions[i], actions[1 - i],
+                    dt=self.dt, kinematic=self.kinematic,
+                    collision_mode=self.collision_mode, goal_tolerance=self.radius
+                )
+                rewards[i] = float(r_i)
+                end_ratios[i] = float(end_i)
 
         # 碰撞互斥（按开源实现，对称）
         # --- 碰撞同步化：任一侧判为碰撞 -> 双方都按碰撞处理 ---
         COLL_PEN = float(getattr(getattr(self.cfg, "reward", object()), "collision_penalty", -0.25))  # pylint: disable=invalid-name
         GOAL_REW = float(getattr(getattr(self.cfg, "reward", object()), "goal_reward", 1.0))  # pylint: disable=invalid-name
-        EPS = 1e-6  # pylint: disable=invalid-name  # 数值容差，放宽到 1e-6 更稳
+        # 数值容差：compute_reward 会在终止步上叠加一个很小的 time_penalty（例如 -0.008*dt ≈ -8e-4），
+        # 若直接用奖励值等于 1.0/-0.25 判定，将错过终止信号；放宽 EPS 以兼容这类微小偏移。
+        EPS = 1e-3  # pylint: disable=invalid-name
 
         col0 = abs(rewards[0] - COLL_PEN) < EPS
         col1 = abs(rewards[1] - COLL_PEN) < EPS
 
-        # 也检查到达goal的情况
-        goal0 = abs(rewards[0] - GOAL_REW) < EPS
-        goal1 = abs(rewards[1] - GOAL_REW) < EPS
-
+        # 碰撞是双方事件，需要同步（任一判为碰撞，双方都按碰撞处理）
         if col0 or col1:
-            # 若某一侧到达(goal)而另一侧碰撞，优先级：碰撞 > 到达
+            # 若某一侧判定为碰撞，双方都按碰撞处理
             # 用"更早"的截断比例（谁先撞用谁），保证推进一致
             t_ratio = min(float(end_ratios[0]), float(end_ratios[1]))
             rewards[0] = rewards[1] = COLL_PEN
             end_ratios[0] = end_ratios[1] = t_ratio
-        elif goal0 or goal1:
-            # 如果只有goal而无碰撞，也统一奖励（保持一致性）
-            # 这可以避免两边计算略有差异的情况
-            t_ratio = min(float(end_ratios[0]), float(end_ratios[1]))
-            # 如果有一方到达，都给到达奖励
-            if goal0 or goal1:
-                rewards[0] = rewards[1] = GOAL_REW
-                end_ratios[0] = end_ratios[1] = t_ratio
+        # 注意：goal 是单方事件，不需要同步！
+        # 每个智能体的 goal 奖励由 compute_reward 独立计算，此处不覆盖
 
 
         # 2) 依据各自 end_time_ratio 推进（用 sim.dynamics，避免重复公式）
@@ -190,17 +190,40 @@ class CADRLEnv:
 
         # 3) 组合新的 JointState、更新 done
         states = [self._joint_state(i) for i in range(2)]
+
+        # 计算真实碰撞（当前位置距离）- 与 reward.py 中使用相同的判定逻辑
+        dist = math.hypot(
+            self._agents[0].px - self._agents[1].px,
+            self._agents[0].py - self._agents[1].py
+        )
+        sum_r = self._agents[0].radius + self._agents[1].radius
+        eps_c = 1e-8 * float(max(1.0, sum_r))
+        real_collision = (dist <= sum_r + eps_c)
+
+        # 额外：用几何方式判断“到达目标”（避免依赖奖励值的精确相等）
+        goal_reached = [False, False]
         for i in range(2):
             a = self._agents[i]
-            r = rewards[i]
+            gdist = math.hypot(a.px - a.pgx, a.py - a.pgy)
+            # 使用与半径同量级的容差
+            goal_reached[i] = (gdist <= (a.radius + 1e-8))
+
+        # 更新 done 状态（只处理未终止的 agent）
+        for i in range(2):
+            a = self._agents[i]
             if a.done == 0:  # 只处理活跃的
-                if r == SPEC.goal_reward:
-                    a.done = 1
-                elif r == SPEC.collision_penalty:
+                # 判定优先级：碰撞 > 到达 > 越界 > 超时
+                if real_collision:
+                    # 真实碰撞：与 reward 判定使用相同距离
                     a.done = 2
+                elif goal_reached[i]:
+                    # 到达目标（几何判定）
+                    a.done = 1
                 elif not self._in_bound(i):
+                    # 越界
                     a.done = 3
                 elif self._step_count >= self.max_steps:
+                    # 超时
                     a.done = 4
                 else:
                     a.done = 0

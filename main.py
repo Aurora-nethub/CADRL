@@ -7,10 +7,8 @@ Keep argument parsing here; `scripts.train` exposes `run_training` without CLI.
 from __future__ import annotations
 
 
-import os
 import argparse
 import sys
-import subprocess
 import random
 from typing import Optional
 
@@ -19,11 +17,13 @@ import torch
 
 from core import get_config_container
 from scripts.train import run_training
+from scripts.test import run_test
 
 
 def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="CADRL training/test entry point")
     parser.add_argument("--mode", type=str, default="train", choices=["train", "test"], help="Mode: train or test")
+    parser.add_argument("--case", type=int, default=0, help="Test case id (0~9)")
     parser.add_argument("--run-name", type=str, default=None, help="Name for this training run")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--device", type=str, default=None, help="Device to use (cpu or cuda[:id])")
@@ -90,12 +90,12 @@ def main(argv: Optional[list] = None) -> None:
         # best-effort logging: if logger fails, print to stderr
         sys.stderr.write(f"Logger init failed: {exc}\n")
 
-
     if getattr(args, "mode", "train") == "test":
-        cmd = [sys.executable, os.path.join(os.path.dirname(__file__), "scripts", "test.py")]
-        if args.run_name:
-            cmd += ["--run-name", args.run_name]
-        subprocess.run(cmd, check=True)
+        # 直接调用测试函数，不用子进程
+        # 如果未指定case参数，则run_test内部自动随机case
+        if hasattr(args, "case") and args.case is not None:
+            run_test._case = args.case
+        run_test(cfg, device=device, run_name=args.run_name)
     else:
         # call training routine
         run_training(cfg, device=device, resume=args.resume, run_name=args.run_name)

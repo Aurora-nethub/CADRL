@@ -20,6 +20,8 @@ class ValueNetwork(nn.Module):
 
         # 根据是否使用重新参数化调整输入维度
         input_dim = 15 if reparametrization else state_dim
+        # remember the declared (original) state_dim for save/load compatibility
+        self.declared_state_dim = int(state_dim)
 
         # 构建多层感知机
         layers = []
@@ -80,22 +82,22 @@ class ValueNetwork(nn.Module):
         # 计算目标距离
         dg = torch.sqrt(dx**2 + dy**2)
 
-        # 旋转自身速度
+        # 旋转自身速度（标准旋转矩阵）
         vx_rot = vx * cos_rot + vy * sin_rot
-        vy_rot = vy * cos_rot - vx * sin_rot
+        vy_rot = -vx * sin_rot + vy * cos_rot
 
         # 调整角度
         theta_rot = theta - rot if self.kinematic else theta
 
-        # 旋转其他智能体速度
+        # 旋转其他智能体速度（标准旋转矩阵）
         vx1_rot = vx1 * cos_rot + vy1 * sin_rot
-        vy1_rot = vy1 * cos_rot - vx1 * sin_rot
+        vy1_rot = -vx1 * sin_rot + vy1 * cos_rot
 
-        # 旋转其他智能体位置（相对位置）
+        # 旋转其他智能体位置（相对位置，标准旋转矩阵）
         px1_rel = px1 - px
         py1_rel = py1 - py
         px1_rot = px1_rel * cos_rot + py1_rel * sin_rot
-        py1_rot = py1_rel * cos_rot - px1_rel * sin_rot
+        py1_rot = -px1_rel * sin_rot + py1_rel * cos_rot
 
         # 计算其他特征
         radius_sum = radius + radius1
@@ -123,8 +125,8 @@ class ValueNetwork(nn.Module):
         torch.save({
             'state_dict': self.state_dict(),
             'config': {
-                # when reparametrization=True the rotate() produces a 15-D input
-                'state_dim': self.value_network[0].in_features if not self.reparametrization else 15,
+                # preserve the original declared state_dim (14 by default)
+                'state_dim': self.declared_state_dim,
                 'fc_layers': [layer.out_features for layer in self.value_network if isinstance(layer, nn.Linear)][:-1],
                 'kinematic': self.kinematic,
                 'reparametrization': self.reparametrization

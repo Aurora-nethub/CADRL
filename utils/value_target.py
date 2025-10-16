@@ -120,7 +120,8 @@ class TDTarget(PairGenerator):
             out = m(s_batch if self.device is None else s_batch.to(self.device))
         except TypeError:
             out = m(s_batch if self.device is None else s_batch.to(self.device), self.device)
-        return out  # (B,1)
+        # Clamp to a safe range for stability
+        return torch.clamp(out, -2.0, 2.0)  # (B,1)
 
     def compute_pairs(self,
                       traj: Trajectory,

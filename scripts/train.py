@@ -22,7 +22,7 @@ from agent import CADRLAgent
 from models import ValueNetwork
 from utils import ActionSpace, ReplayMemory
 from utils.trajectory import Trajectory
-from utils.value_target import ArrivalTimeTarget, TDTarget
+from utils.value_target import ArrivalTimeTarget
 
 
 def load_trajectories(path: str, *, skip_timed_out: bool = True) -> List[Trajectory]:
@@ -172,7 +172,7 @@ def run_training(
                 loss_pre.backward()
                 preoptimizer.step()
                 pretrain_pbar.set_postfix({
-                    "loss": f"{loss_pre.item():.4f}",
+                    "loss": f"{loss_pre.item():.6f}",
                     "pairs": total_pairs,
                     "batch": pretrain_batch_size
                 })
@@ -243,7 +243,7 @@ def run_training(
         stage1 = disturb_schedule.get("stage1_epochs", 0)
         stage2 = disturb_schedule.get("stage2_epochs", 0)
         stage3 = disturb_schedule.get("stage3_epochs", 0)
-        
+
         if epoch < stage1:
             env.disturb_range = tuple(disturb_schedule.get("stage1_range", [1.0, 1.0]))
         elif epoch < stage1 + stage2:
@@ -255,6 +255,7 @@ def run_training(
         # collect some episodes into replay
         episode_rewards = []
         episode_lengths = []
+        success_count = 0  # 统计本轮成功到达的 episode 数
 
         for _ in range(sample_episodes):
             states = env.reset()
@@ -264,6 +265,10 @@ def run_training(
             ep_buf = []
 
             # 记录完整轨迹信息（用于构造Trajectory）
+            # 修正：缓存初始目标坐标（从初始状态读取）
+            initial_goal_x = float(states[0].self_state.pgx)
+            initial_goal_y = float(states[0].self_state.pgy)
+
             ep_times = [0.0]
             ep_positions = [[
                 [states[0].self_state.px, states[0].self_state.py],
@@ -286,8 +291,18 @@ def run_training(
                         a = agent.act(s, env, i, mode="train")
                     actions.append(a)
                 s_next, rewards, dones = env.step(actions)
-                eff_dt = float(env.last_step_ratio) * float(env.dt)
+                # 修正：eff_dt加下界保护，避免折扣失效
+                eff_dt = max(1e-3, float(env.last_step_ratio) * float(env.dt))
                 t_acc += eff_dt
+                # 写入经验回放（两名智能体都写入，保留JointState）
+                for i in range(2):
+                    replay.push(
+                        states[i],
+                        float(rewards[i]),
+                        s_next[i],
+                        bool(dones[i] != 0),
+                        float(eff_dt),
+                    )
                 for i in range(2):
                     ep_buf.append({
                         "s": states[i],
@@ -303,14 +318,47 @@ def run_training(
                     [s_next[0].neighbor_state.px, s_next[0].neighbor_state.py]
                 ])
 
+                # 修正：先累计当前步奖励（包括终止步），再更新 done 状态
+                # 这样终止步的 goal_reward 或 collision_penalty 才会被正确计入
                 ep_reward += rewards[0]
+                
                 states = s_next
                 done = [d != 0 for d in dones]
                 steps += 1
+            reward_types = {"living_cost": 0, "near": 0, "collision": 0, "goal": 0, "zero": 0, "other": 0}
+            other_samples = []  # 用于调试：记录前几个 "other" 类的奖励值
+            for idx, tr in enumerate(ep_buf):
+                r = tr["r"]
+                # 精确判断reward类型
+                if abs(r) < 1e-9:
+                    # 已终止智能体的后续步骤（reward=0）
+                    reward_types["zero"] += 1
+                elif abs(r - (-0.008 * float(tr["dt"])) ) < 1e-5:
+                    reward_types["living_cost"] += 1
+                elif abs(r + 0.25) < 1e-4:
+                    reward_types["collision"] += 1
+                # 终止步有微小的时间惩罚（例如 1.0 - 0.008*dt ≈ 0.9992），放宽阈值
+                elif (r > 0.9) or (abs(r - 1.0) < 2e-3):
+                    reward_types["goal"] += 1
+                elif r < -0.01 and r > -0.25:
+                    reward_types["near"] += 1
+                else:
+                    reward_types["other"] += 1
+                    if len(other_samples) < 5:  # 只记录前5个
+                        other_samples.append(f"{r:.6f}")
+            
+            # 判断是否成功到达（agent 0 的 done 为 1）
+            if dones[0] == 1:
+                success_count += 1
+            
+            # 添加更详细的终止状态信息
+            done_status = {0: "活跃", 1: "到达✅", 2: "碰撞❌", 3: "越界❌", 4: "超时❌"}
+            agent0_status = done_status.get(dones[0], f"未知({dones[0]})")
+            agent1_status = done_status.get(dones[1], f"未知({dones[1]})")
+            
+            other_info = f" other_samples={other_samples}" if other_samples else ""
+            # print(f"[A0_reward={ep_reward:.3f}, steps={steps}, A0:{agent0_status}, A1:{agent1_status}] reward分布: {reward_types}{other_info}", flush=True)
 
-            # episode 结束后统一写入
-            for tr in ep_buf:
-                replay.push(**tr)
             episode_rewards.append(ep_reward)
             episode_lengths.append(steps)
 
@@ -318,8 +366,8 @@ def run_training(
             if len(ep_positions) >= 2:
                 traj = Trajectory(
                     gamma=float(cfg.model.gamma),
-                    goal_x=float(cfg.sim.crossing_radius),
-                    goal_y=0.0,
+                    goal_x=initial_goal_x,
+                    goal_y=initial_goal_y,
                     radius=float(cfg.agent.radius),
                     v_pref=float(cfg.agent.v_pref),
                     times=np.array(ep_times, dtype=np.float32),
@@ -330,23 +378,25 @@ def run_training(
                 if len(recent_episodes) > 5:
                     recent_episodes.pop(0)
 
-                # 每个episode后都做一次FQI微调（只要recent_episodes满5条）
-                if len(recent_episodes) == 5:
-                    tdgen = TDTarget(gamma=float(cfg.model.gamma), model_or_fn=model, device=device)
-                    all_pairs = []
-                    for t in recent_episodes:
-                        pairs = tdgen.compute_pairs(t, times=t.times.tolist())
-                        all_pairs.extend(pairs)
-                    if all_pairs:
-                        s_batch = torch.stack([p[0].flatten() for p in all_pairs]).to(device)
-                        y_batch = torch.stack([p[1].flatten() for p in all_pairs]).to(device)
-                        model.train()
-                        optimizer.zero_grad()
-                        pred = model(s_batch)
-                        loss_fqi = nn.functional.mse_loss(pred, y_batch)
-                        loss_fqi.backward()
-                        optimizer.step()
-                        tqdm.write(f"💡 FQI微调: 用{len(all_pairs)}对样本做一轮回归, loss={loss_fqi.item():.8f}")
+                # ===== FQI微调已暂时禁用 =====
+                # 原因：避免value爆炸时微调进一步恶化
+                # 如需启用，取消下面注释即可
+                # if len(recent_episodes) == 5:
+                #     tdgen = TDTarget(gamma=float(cfg.model.gamma), model_or_fn=model, device=device)
+                #     all_pairs = []
+                #     for t in recent_episodes:
+                #         pairs = tdgen.compute_pairs(t, times=t.times.tolist())
+                #         all_pairs.extend(pairs)
+                #     if all_pairs:
+                #         s_batch = torch.stack([p[0].flatten() for p in all_pairs]).to(device)
+                #         y_batch = torch.stack([p[1].flatten() for p in all_pairs]).to(device)
+                #         model.train()
+                #         optimizer.zero_grad()
+                #         pred = model(s_batch)
+                #         loss_fqi = nn.functional.mse_loss(pred, y_batch)
+                #         loss_fqi.backward()
+                #         optimizer.step()
+                #         tqdm.write(f"💡 FQI微调: 用{len(all_pairs)}对样本做一轮回归, loss={loss_fqi.item():.8f}")
 
 
         # learning step if enough data
@@ -361,12 +411,31 @@ def run_training(
 
             with torch.no_grad():
                 v_next = model(s_next).detach()
+                # Clamp predicted next-state values to a safe range to avoid exploding targets
+                v_next = torch.clamp(v_next, -2.0, 2.0)
             v = model(s)
 
             gamma = float(cfg.model.gamma)
-            v_pref = float(cfg.agent.v_pref)
-            g = gamma ** (dt_b * v_pref)
-            y = r + g * v_next * (~done)
+            dt_ref = float(cfg.sim.dt)  # 参考时间步长
+            # 修正：使用时间折扣，去掉v_pref
+            g = gamma ** (dt_b / dt_ref)
+            # 修正：done掩码显式转换
+            done_mask = (~done.bool()).float()
+            y = r + g * v_next * done_mask
+            # Final safeguard: clamp TD target
+            y = torch.clamp(y, -2.0, 2.0)
+
+            # 安全检查：TD target是否合理
+            if torch.any(y < -2.0) or torch.any(y > 2.0):
+                bad_indices = torch.where((y < -2.0) | (y > 2.0))[0]
+                tqdm.write("\n" + "="*70)
+                tqdm.write("⚠️ TD TARGET OUT OF RANGE ⚠️")
+                tqdm.write("="*70)
+                for idx in bad_indices[:5]:  # 只打印前5个
+                    tqdm.write(f"Sample {idx}: y={y[idx].item():.6f}, r={r[idx].item():.6f}, "
+                              f"v_next={v_next[idx].item():.6f}, g={g[idx].item():.6f}, "
+                              f"done_mask={done_mask[idx].item():.1f}")
+                tqdm.write("="*70 + "\n")
 
             loss = nn.functional.mse_loss(v, y)
             optimizer.zero_grad()
@@ -377,11 +446,13 @@ def run_training(
         # 更新进度条显示
         avg_reward = np.mean(episode_rewards) if episode_rewards else 0.0
         avg_length = np.mean(episode_lengths) if episode_lengths else 0.0
+        success_rate = success_count / max(1, sample_episodes)
         train_pbar.set_postfix({
-            "loss": f"{train_loss:.4f}",
+            "loss": f"{train_loss:.6f}",
             "reward": f"{avg_reward:.2f}",
-            "steps": f"{avg_length:.1f}",
-            "replay": len(replay)
+            "succ": f"{success_rate:.2f}",
+            "replay": f"{len(replay)}",
+            "steps": f"{avg_length:.1f}"
         })
 
         # checkpoint regularly

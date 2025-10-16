@@ -5,6 +5,7 @@ from typing import List, Optional, Union
 import torch
 
 from utils import Action, ActionSpace, JointState
+from sim.reward import compute_lookahead_score
 
 
 class CADRLAgent:
@@ -85,18 +86,43 @@ class CADRLAgent:
         if mode == "train":
             eps = self.default_epsilon if (epsilon is None) else float(epsilon)
             if random.random() < eps:
-                return self.action_space.sample()
+                # 修正：排除零速/低速动作（velocity < 0.1）
+                all_actions = self.action_space.get_actions()
+                non_zero_actions = [a for a in all_actions if abs(a.velocity) > 0.1]
+                if non_zero_actions:
+                    return random.choice(non_zero_actions)
+                else:
+                    return self.action_space.sample()
 
         # 贪婪动作（批量前瞻 + 批量 V 估计）
-        actions = self.action_space.get_actions()
+        # 修正：25预设动作 + 10随机动作（符合论文）
+        preset_actions = self.action_space.get_actions()[:25]  # 前25个预设
+        random_actions = [self.action_space.sample() for _ in range(10)]
+        actions = preset_actions + random_actions
+
         next_states: List[torch.Tensor] = []
         rewards: List[float] = []
+        lookahead_scores: List[float] = []
 
-        # 对每个候选动作，使用 env.peek 无副作用地得到 (s', r, end_ratio)
+        # 对每个候选动作：
+        # 1. 使用 env.peek 得到一步后的 (s', r) - 环境层的即时 reward
+        # 2. 使用 compute_lookahead_score 做前瞻评估 - 策略层的前瞻评分
         for a in actions:
             sn, r, _ = env.peek(my_idx, a, other_action=None)
             next_states.append(sn)     # (14,) CPU
             rewards.append(float(r))
+            
+            # 策略层前瞻：评估该动作在 1s 窗口内的安全性
+            lh_score = compute_lookahead_score(
+                s14, a, action_other=None,
+                kinematic=getattr(env, "kinematic", True),
+                collision_mode=getattr(env, "collision_mode", "analytic"),
+                lookahead_time=1.0,
+                lookahead_steps=10,
+                near_penalty=-0.1,
+                near_gap_threshold=0.2,
+            )
+            lookahead_scores.append(float(lh_score))
 
         # 批量送入值网络
         ns_batch = torch.stack(next_states, dim=0)  # (N,14) CPU
@@ -108,8 +134,13 @@ class CADRLAgent:
         gamma_eff = self._gamma_eff(s14)
 
         # 评分并选择最优
-        scores = [r + gamma_eff * vn for r, vn in zip(rewards, v)]
-        best_idx = int(max(range(len(scores)), key=lambda i: scores[i]))
+        # score = 环境层即时reward + 前瞻评分 + 折扣未来价值
+        scores = [r + lh + gamma_eff * vn for r, lh, vn in zip(rewards, lookahead_scores, v)]
+        max_score = max(scores)
+
+        # 修正：平手时随机打破（论文要求）
+        best_indices = [i for i, s in enumerate(scores) if abs(s - max_score) < 1e-6]
+        best_idx = random.choice(best_indices)
         return actions[best_idx]
 
     # ---------------- 内部工具 ----------------
